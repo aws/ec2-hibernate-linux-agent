@@ -1,0 +1,130 @@
+#!/usr/bin/env python2.7
+import os
+import syslog
+import ctypes as ctypes
+import sys
+
+import errno
+
+import mmap
+import urllib2
+from time import sleep
+
+log_to_syslog = True
+log_to_stderr = True
+
+
+def log(message):
+    if log_to_syslog:
+        syslog.syslog(message)
+    if log_to_stderr:
+        sys.stderr.write("%s\n" % message)
+
+
+def fallocate(fl, size):
+    try:
+        _libc = ctypes.CDLL('libc.so.6')
+        _fallocate = _libc.fallocate
+        _fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong]
+
+        # (FD, mode, offset, len)
+        res = _fallocate(fl.fileno(), 0, 0, size)
+        if res != 0:
+            raise Exception("Error %d" % res)
+    except Exception as e:
+        log("Failed to call fallocate(), will use resize. Err: %s" % e.message)
+        fl.seek(size-1)
+        fl.write(chr(0))
+
+
+def mlockall():
+    log("Locking all the code in memory")
+    try:
+        _libc = ctypes.CDLL('libc.so.6')
+        _mlockall = _libc.mlockall
+        _mlockall.argtypes = [ctypes.c_int]
+        # MCL_CURRENT | MCL_FUTURE
+        print _mlockall(1 | 2)
+    except Exception as e:
+        log("Failed to lock hibernator into RAM. Error: %s" % e.message)
+
+
+class SwapInitializer(object):
+    def __init__(self, filename, swap_size):
+        self.filename = filename
+        self.swap_size = swap_size
+
+    def do_allocate(self):
+        log("Allocating %d bytes in %s" % (self.swap_size, self.filename))
+        with open(self.filename, 'w+') as fl:
+            fallocate(fl, self.swap_size)
+
+    def init_swap(self):
+        """
+            Initialize the swap using direct IO to avoid polluting the page cache
+        """
+        written = 0
+        log("Opening %s for direct IO" % self.filename)
+        fd = os.open(self.filename, os.O_RDWR | os.O_DIRECT | os.O_SYNC | os.O_DSYNC)
+        if fd < 0:
+            raise Exception("Failed to initialize the swap. Err: %s" % errno.errorcode[os.errno])
+
+        # Create a filler block that is correctly aligned for direct IO
+        filler_block = mmap.mmap(-1, 1024 * 1024)
+        filler_block.write('b' * 1024 * 1024)
+
+        log("Touching all blocks in %s" % self.filename)
+        try:
+            while written < self.swap_size:
+                res = os.write(fd, filler_block)
+                if res <= 0:
+                    raise Exception("Failed to touch a block. Err: %s" % errno.errorcode[os.errno])
+                written += res
+        finally:
+            filler_block.close()
+            os.close(fd)
+        log("Swap file %s is ready" % self.filename)
+
+
+class ItnPoller(object):
+    def __init__(self, url, hibernate_cmd):
+        self.url = url
+        self.hibernate_cmd = hibernate_cmd
+
+    def poll_loop(self):
+        while True:
+            if self.poll_for_termination():
+                self.do_hibernate()
+            sleep(1)
+
+    def poll_for_termination(self):
+        # noinspection PyBroadException
+        try:
+            response = urllib2.urlopen(self.url)
+            response.read()
+            return True
+        except:
+            return False
+
+    def do_hibernate(self):
+        log("Attempting to hibernate")
+        try:
+            os.subprocess.call(self.hibernate_cmd, shell=True)
+        except Exception as e:
+            log("Failed to hibernate, reason: %s" % e.message)
+        # We're not guaranteed to be stopped immediately after the hibernate
+        # command fires. So wait a little bit to avoid triggering ourselves twice
+        sleep(20)
+
+
+
+def main():
+    ItnPoller('http://8.8.8.8', '/bin/ls').poll_for_termination()
+    #sw = SwapInitializer('/tmp/filea', 6*1024*1024*1024)
+    #sw.do_allocate()
+    #sw.init_swap()
+    mlockall()
+
+
+if __name__ == '__main__':
+    main()
