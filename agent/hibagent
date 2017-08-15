@@ -1,0 +1,466 @@
+#!/usr/bin/python
+# The EC2 Spot hibernation agent. This agent does several things:
+# 1. Upon startup it checks for sufficient swap space to allow hibernate and fails
+#    if it's present but there's not enough of it.
+# 2. If there's no swap space, it creates it and launches a background thread to
+#    touch all of its blocks to make sure that EBS volumes are pre-warmed.
+# 3. It updates the offset of the swap file in the kernel using SNAPSHOT_SET_SWAP_AREA ioctl.
+# 4. It daemonizes and starts a polling thread to listen for instance termination notifications.
+#
+# This file is compatible both with Python 2 and Python 3
+import argparse
+import array
+import atexit
+import ctypes as ctypes
+import errno
+import fcntl
+import mmap
+import os
+import struct
+import sys
+import syslog
+from subprocess import call, check_call
+from threading import Thread
+from time import sleep
+
+try:
+    from urllib.request import urlopen, Request
+except ImportError:
+    from urllib2 import urlopen, Request, HTTPError
+
+try:
+    from ConfigParser import ConfigParser, NoSectionError, NoOptionError
+except:
+    from configparser import ConfigParser, NoSectionError, NoOptionError
+
+log_to_syslog = True
+log_to_stderr = True
+
+
+def log(message):
+    if log_to_syslog:
+        syslog.syslog(message)
+    if log_to_stderr:
+        sys.stderr.write("%s\n" % message)
+
+
+def fallocate(fl, size):
+    try:
+        _libc = ctypes.CDLL('libc.so.6')
+        _fallocate = _libc.fallocate
+        _fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong]
+
+        # (FD, mode, offset, len)
+        res = _fallocate(fl.fileno(), 0, 0, size)
+        if res != 0:
+            raise Exception("Failed to perform fallocate(). Result: %d" % res)
+    except Exception as e:
+        log("Failed to call fallocate(), will use resize. Err: %s" % str(e))
+        fl.seek(size-1)
+        fl.write(chr(0))
+
+
+def mlockall():
+    log("Locking all the code in memory")
+    try:
+        _libc = ctypes.CDLL('libc.so.6')
+        _mlockall = _libc.mlockall
+        _mlockall.argtypes = [ctypes.c_int]
+        _MCL_CURRENT = 1
+        _MCL_FUTURE = 2
+        _mlockall(_MCL_CURRENT | _MCL_FUTURE)
+    except Exception as e:
+        log("Failed to lock hibernation agent into RAM. Error: %s" % str(e))
+
+
+def get_file_block_number(filename):
+    with open(filename, 'r') as handle:
+        buf = array.array('L', [0])
+        # from linux/fs.h
+        FIBMAP = 0x01
+        result = fcntl.ioctl(handle.fileno(), FIBMAP, buf)
+    if result < 0:
+        raise Exception("Failed to get the file offset. Error=%d" % result)
+    return buf[0]
+
+
+def get_swap_space():
+    # Format is (tab-separated):
+    # Filename Type Size Used Priority
+    # / swapfile file 536870908 0 - 1
+    with open('/proc/swaps') as swp:
+        lines = swp.readlines()[1:]
+        if not lines:
+            return 0
+        return int(lines[0].split()[2]) * 1024
+
+
+def update_kernel_swap_offset():
+    with open('/proc/swaps') as swp:
+        lines = swp.readlines()[1:]
+        if not lines:
+            raise Exception("Swap file is not found")
+        filename = lines[0].split()[0]
+    log("Updating the kernel offset for the swapfile: %s" % filename)
+
+    statbuf = os.stat(filename)
+    dev = statbuf.st_dev
+    offset = get_file_block_number(filename)
+
+    log("Setting swap device to %d with offset %d" % (dev, offset))
+
+    # Set the kernel swap offset, see https://www.kernel.org/doc/Documentation/power/userland-swsusp.txt
+    # From linux/suspend_ioctls.h
+    SNAPSHOT_SET_SWAP_AREA = 0x400C330D
+    buf = struct.pack('LI', offset, dev)
+    with open('/dev/snapshot', 'r') as snap:
+        fcntl.ioctl(snap, SNAPSHOT_SET_SWAP_AREA, buf)
+    log("Done updating the swap offset")
+
+
+class SwapInitializer(object):
+    def __init__(self, filename, swap_size, mkswap, swapon):
+        self.filename = filename
+        self.swap_size = swap_size
+        self.need_to_hurry = False
+        self.mkswap = mkswap
+        self.swapon = swapon
+
+    def do_allocate(self):
+        log("Allocating %d bytes in %s" % (self.swap_size, self.filename))
+        with open(self.filename, 'w+') as fl:
+            fallocate(fl, self.swap_size)
+        os.chmod(self.filename, 0o600)
+
+    def init_swap(self):
+        """
+            Initialize the swap using direct IO to avoid polluting the page cache
+        """
+        try:
+            cur_swap_size = os.stat(self.filename).st_size
+            if cur_swap_size >= self.swap_size:
+                log("Swap file size (%d bytes) is already large enough" % cur_swap_size)
+                return
+        except OSError:
+            pass
+        self.do_allocate()
+
+        written = 0
+        log("Opening %s for direct IO" % self.filename)
+        fd = os.open(self.filename, os.O_RDWR | os.O_DIRECT | os.O_SYNC | os.O_DSYNC)
+        if fd < 0:
+            raise Exception("Failed to initialize the swap. Err: %s" % os.strerror(os.errno))
+
+        filler_block = None
+        try:
+            # Create a filler block that is correctly aligned for direct IO
+            filler_block = mmap.mmap(-1, 1024 * 1024)
+            # We're using 'b' to avoid optimizations that might happen for zero-filled pages
+            filler_block.write(b'b' * 1024 * 1024)
+
+            log("Touching all blocks in %s" % self.filename)
+
+            while written < self.swap_size and not self.need_to_hurry:
+                res = os.write(fd, filler_block)
+                if res <= 0:
+                    raise Exception("Failed to touch a block. Err: %s" % os.strerror(os.errno))
+                written += res
+        finally:
+            os.close(fd)
+            if filler_block:
+                filler_block.close()
+        log("Swap file %s is ready" % self.filename)
+
+    def turn_on_swap(self):
+        # Do mkswap
+        try:
+            mkswap = self.mkswap.format(swapfile=self.filename)
+            log("Running: %s" % mkswap)
+            check_call(mkswap, shell=True)
+            swapon = self.swapon.format(swapfile=self.filename)
+            log("Running: %s" % swapon)
+            check_call(swapon, shell=True)
+        except Exception as e:
+            log("Failed to initialize swap, reason: %s" % str(e))
+
+
+class BackgroundInitializerRunner(object):
+    def __init__(self, swapper):
+        self.swapper = swapper
+        self.thread = None
+        self.error = None
+
+    def start_init(self):
+        self.thread = Thread(target=self.do_async_init, name="SwapInitializer")
+        self.thread.setDaemon(True)
+        self.thread.start()
+
+    def check_finished(self):
+        if self.thread is not None:
+            self.thread.join(timeout=0)
+            if self.thread.isAlive():
+                return False
+            self.thread = None
+
+        log("Background swap initialization thread is complete.")
+        if self.error is not None:
+            raise self.error
+        return True
+
+    def force_completion(self):
+        log("We're out of time, stopping the background swap initialization.")
+        self.swapper.need_to_hurry = True
+        self.thread.join()
+        log("Background swap initialization thread has stopped.")
+        self.thread = None
+        if self.error is not None:
+            raise self.error
+
+    def do_async_init(self):
+        try:
+            self.swapper.init_swap()
+            self.swapper.turn_on_swap()
+            update_kernel_swap_offset()
+        except Exception as ex:
+            log("Failed to initialize swap, reason: %s" % str(ex))
+            self.error = ex
+
+
+class ItnPoller(object):
+    def __init__(self, url, hibernate_cmd, initializer):
+        self.url = url
+        self.hibernate_cmd = hibernate_cmd
+        self.initializer = initializer
+
+    def poll_loop(self):
+        log("Starting the hibernation polling loop")
+        while True:
+            self.run_loop_iteration()
+            sleep(1)
+
+    def run_loop_iteration(self):
+        if self.initializer and self.initializer.check_finished():
+            self.initializer = None
+        if self.poll_for_termination():
+            if self.initializer:
+                self.initializer.force_completion()
+                self.initializer = None
+            self.do_hibernate()
+
+    def poll_for_termination(self):
+        # noinspection PyBroadException
+        response = None
+        try:
+            response = urlopen(self.url)
+            res_str = response.read()
+            return b"hibernate" in res_str
+        except:
+            return False
+        finally:
+            if response:
+                response.close()
+
+    def do_hibernate(self):
+        log("Attempting to hibernate")
+        try:
+            check_call(self.hibernate_cmd, shell=True)
+        except Exception as e:
+            log("Failed to hibernate, reason: %s" % str(e))
+        # We're not guaranteed to be stopped immediately after the hibernate
+        # command fires. So wait a little bit to avoid triggering ourselves twice
+        sleep(2)
+
+
+def daemonize(pidfile):
+    """
+        Convert the process into a daemon, doing the usual Unix magic
+    """
+    try:
+        pid = os.fork()
+        if pid > 0:
+            # Exit from first parent
+            sys.exit(0)
+    except OSError as e:
+        log("Fork #1 failed: %d (%s)\n" % (e.errno, e.strerror))
+        sys.exit(1)
+
+    # Decouple from parent environment
+    os.chdir("/")
+    os.setsid()
+    os.umask(0)
+
+    # Second fork
+    try:
+        pid = os.fork()
+        if pid > 0:
+            # Exit from second parent
+            sys.exit(0)
+    except OSError as e:
+        log("Fork #2 failed: %d (%s)\n" % (e.errno, e.strerror))
+        sys.exit(1)
+
+    # Write the PID file
+    pid = str(os.getpid())
+    with open(pidfile, "w+") as fl:
+        fl.write("%s\n" % pid)
+    atexit.register(lambda: os.unlink(pidfile))
+
+    # Redirect standard file descriptors to null to avoid blocking
+    nul = file('/dev/null', 'a+')
+    os.dup2(nul.fileno(), sys.stdin.fileno())
+    os.dup2(nul.fileno(), sys.stdout.fileno())
+    os.dup2(nul.fileno(), sys.stderr.fileno())
+
+
+class Config(object):
+    def __init__(self, config, args):
+        def get(section, name):
+            try:
+                return config.get(section, name)
+            except NoSectionError:
+                return None
+            except NoOptionError:
+                return None
+
+        def get_int(section, name):
+            v = get(section, name)
+            if v is None:
+                return None
+            return int(v)
+
+        self.lock_in_ram = self.merge(
+            self.to_bool(get('core', 'lock-in-ram')), self.to_bool(args.lock_in_ram), True)
+        self.log_to_syslog = self.merge(
+            self.to_bool(get('core', 'log-to-syslog')), self.to_bool(args.log_to_syslog), True)
+        self.log_to_stderr = self.merge(
+            self.to_bool(get('core', 'log-to-stderr')), self.to_bool(args.log_to_stderr), True)
+        self.ephemeral_check = self.merge(
+            self.to_bool(get('core', 'check-ephemeral-volumes')),
+            self.to_bool(args.check_ephemeral_volumes), True)
+
+        self.swap_percentage = self.merge(
+            get_int('swap', 'percentage-of-ram'), args.swap_ram_percentage, 100)
+        self.swap_mb = self.merge(
+            get_int('swap', 'target-size-mb'), args.swap_target_size_mb, 4000)
+
+        self.mkswap = self.merge(get('swap', 'mkswap'), args.mkswap, '/sbin/mkswap {swapfile}')
+        self.swapon = self.merge(get('swap', 'swapon'), args.swapon, '/sbin/swapon {swapfile}')
+        self.swapfile = self.merge(get('swap', 'swapfile'), args.swapfile, '/swap')
+
+        self.hibernate = self.merge(
+            get('pm-utils', 'hibernate-command'), args.hibernate, '/usr/sbin/pm-hibernate')
+        self.url = self.merge(
+            get('notification', 'monitored-url'), args.monitored_url,
+            'http://169.254.169.254/latest/meta-data/spot/instance-action')
+
+    def merge(self, cf_value, arg_value, def_val):
+        if arg_value is not None:
+            return arg_value
+        if cf_value is not None:
+            return cf_value
+        return def_val
+
+    def to_bool(self, bool_str):
+        """Parse the string and return the boolean value encoded or raise an exception"""
+        if bool_str is None:
+            return None
+        if bool_str.lower() in ['true', 't', '1']:
+            return True
+        elif bool_str.lower() in ['false', 'f', '0']:
+            return False
+        # if here we couldn't parse it
+        raise ValueError("%s is not recognized as a boolean value" % bool_str)
+
+    def __str__(self):
+        return str(self.__dict__)
+
+
+def main():
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="An EC2 agent that watches for instance stop "
+                                                 "notifications and initiates hibernation")
+    parser.add_argument('-c', '--config', help='Configuration file to use', type=str)
+    parser.add_argument('-i', '--pidfile', help='The file to write PID to', type=str,
+                        default='/run/hibagent')
+    parser.add_argument('-f', '--foreground', help="Run in foreground, don't daemonize", action="store_true")
+
+    parser.add_argument("-l", "--lock-in-ram", help='Lock the code in RAM', type=str)
+    parser.add_argument("-syslog", "--log-to-syslog", help='Log to syslog', type=str)
+    parser.add_argument("-stderr", "--log-to-stderr", help='Log to stderr', type=str)
+    parser.add_argument("-e", "--check-ephemeral-volumes", help='Check if ephemeral volumes are mounted', type=str)
+
+    parser.add_argument("-p", "--swap-ram-percentage", help='The target swap size as a percentage of RAM', type=int)
+    parser.add_argument("-s", "--swap-target-size-mb", help='The target swap size in megabytes', type=int)
+    parser.add_argument("-w", "--swapfile", help="Swap file name", type=str)
+    parser.add_argument('--mkswap', help='The command line utility to set up swap', type=str)
+    parser.add_argument('--swapon', help='The command line utility to turn on swap', type=str)
+    parser.add_argument('--hibernate', help='The command line utility to initiate hibernation', type=str)
+    parser.add_argument('--monitored-url', help='The URL to monitor for notifications', type=str)
+
+    args = parser.parse_args()
+
+    config_file = ConfigParser()
+    if args.config:
+        config_file.read(args.config)
+
+    config = Config(config_file, args)
+    global log_to_syslog, log_to_stderr
+    log_to_stderr = config.log_to_stderr
+    log_to_syslog = config.log_to_syslog
+
+    log("Effective config: %s" % config)
+
+    target_swap_size = config.swap_mb * 1024 * 1024
+    ram_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+    swap_percentage_size = ram_bytes * config.swap_percentage // 100
+    if swap_percentage_size > target_swap_size:
+        target_swap_size = int(swap_percentage_size)
+    log("Will check if swap is at least: %d megabytes" % (target_swap_size // (1024*1024)))
+
+    cur_swap = get_swap_space()
+    bi = None
+    if cur_swap >= target_swap_size:
+        log("There's sufficient swap available (have %d, need %d)" %
+            (cur_swap, target_swap_size))
+        update_kernel_swap_offset()
+    elif cur_swap > 0:
+        log("There's not enough swap space available (have %d, need %d), exiting" %
+            (cur_swap, target_swap_size))
+        exit(1)
+    else:
+        log("No swap is present, will create and initialize it")
+        # We need to create swap, but first validate that we have enough free space
+        swap_dev = os.path.dirname(config.swapfile)
+        st = os.statvfs(swap_dev)
+        free_bytes = st.f_bavail * st.f_frsize
+        free_space_needed = target_swap_size + 10 * 1024 * 1024
+        if free_space_needed >= free_bytes:
+            log("There's not enough space (%d present, %d needed) on the swap device: %s" % (
+                free_bytes, free_space_needed, swap_dev))
+            exit(1)
+        log("There's enough space (%d present, %d needed) on the swap device: %s" % (
+            free_bytes, free_space_needed, swap_dev))
+
+        sw = SwapInitializer(config.swapfile, target_swap_size,
+                             config.mkswap, config.swapon)
+        bi = BackgroundInitializerRunner(sw)
+
+    # Daemonize now! The parent process will not return from this method
+    if not args.foreground:
+        log("Initial checks are finished, daemonizing and writing PID into %s" % args.pidfile)
+        daemonize(args.pidfile)
+    else:
+        log("Initial checks are finished, will run in foreground now")
+
+    poller = ItnPoller(config.url, config.hibernate, bi)
+    if config.lock_in_ram:
+        mlockall()
+
+    # This loop will now be running inside the child
+    if bi:
+        bi.start_init()
+    poller.poll_loop()
+
+
+if __name__ == '__main__':
+    main()

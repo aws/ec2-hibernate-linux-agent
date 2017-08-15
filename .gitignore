@@ -1,3 +1,10 @@
 .idea
 *.iml
 output
+dist
+*.egg-info
+build
+__pycache__
+*.pyc
+.eggs
+hibagentc
