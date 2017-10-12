@@ -1,2 +1,3 @@
 include README.md LICENSE.txt
-
+include etc/hibagent-config.cfg
+include etc/init.d/hibagent
