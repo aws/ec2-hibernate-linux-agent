@@ -1,0 +1,9 @@
+--- a/agent/hibagent    2017-10-17 23:05:32.283841346 +0000
++++ b/agent/hibagent    2017-10-17 20:05:00.072376831 +0000
+@@ -1,5 +1,5 @@
++#!/usr/bin/python3
+-#!/usr/bin/python
+ # The EC2 Spot hibernation agent. This agent does several things:
+ # 1. Upon startup it checks for sufficient swap space to allow hibernate and fails
+ #    if it's present but there's not enough of it.
+ # 2. If there's no swap space, it creates it and launches a background thread to
