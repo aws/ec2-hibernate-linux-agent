@@ -28,6 +28,24 @@ if platform.system() == "Darwin":
     os.O_DIRECT = 0  # Just pretend that it's there
 
 
+class TestPmFreezeCurve(unittest.TestCase):
+    def test_curve_parsing(self):
+        curve = '0-8:20,8-16:40,16-64:60,64-128:150,128-256:200,256-:400'
+        GB = 1024 ** 3
+        self.assertEqual(20, hibagent.get_pm_freeze_timeout(curve, 7*GB))
+        self.assertEqual(40, hibagent.get_pm_freeze_timeout(curve, 8*GB))
+        self.assertEqual(200, hibagent.get_pm_freeze_timeout(curve, 128*GB))
+        self.assertEqual(400, hibagent.get_pm_freeze_timeout(curve, 500*GB))
+
+    def test_bad_curves(self):
+        holey_curve = '0-8:20,16-64:60'
+        GB = 1024**3
+        self.assertIsNone(hibagent.get_pm_freeze_timeout(holey_curve, 9*GB))
+        self.assertIsNone(hibagent.get_pm_freeze_timeout(holey_curve, 70*GB))
+        self.assertEqual(20, hibagent.get_pm_freeze_timeout(holey_curve, 7*GB))
+        self.assertEqual(60, hibagent.get_pm_freeze_timeout(holey_curve, 22*GB))
+
+
 class TestHibernation(unittest.TestCase):
     def setUp(self):
         self.swapfile = mktemp()

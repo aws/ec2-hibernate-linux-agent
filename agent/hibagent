@@ -12,16 +12,17 @@ import argparse
 import array
 import atexit
 import ctypes as ctypes
-import errno
 import fcntl
 import mmap
 import os
 import struct
 import sys
 import syslog
-from subprocess import call, check_call
+from subprocess import check_call
 from threading import Thread
+from math import ceil
 from time import sleep
+
 
 try:
     from urllib.request import urlopen, Request
@@ -337,6 +338,8 @@ class Config(object):
         self.ephemeral_check = self.merge(
             self.to_bool(get('core', 'check-ephemeral-volumes')),
             self.to_bool(args.check_ephemeral_volumes), True)
+        self.freeze_timeout_curve = self.merge(get('core', 'freeze-timeout-curve'), args.freeze_timeout_curve,
+                                               '0-8:20,8-16:40,16-64:60,64-128:150,128-256:200,256-:400')
 
         self.swap_percentage = self.merge(
             get_int('swap', 'percentage-of-ram'), args.swap_ram_percentage, 100)
@@ -375,6 +378,52 @@ class Config(object):
         return str(self.__dict__)
 
 
+def get_pm_freeze_timeout(freeze_timeout_curve, ram_bytes):
+    if not freeze_timeout_curve:
+        return None
+
+    ram_gb = ceil(ram_bytes / (1024.0*1024.0*1024.0))
+    try:
+        for curve_part in freeze_timeout_curve.split(","):
+            ram_sizes, timeout = curve_part.split(":")
+            sizes_parts = ram_sizes.split("-")
+            if len(sizes_parts) == 2 and sizes_parts[1] and sizes_parts[0]:
+                ram_min = int(sizes_parts[0])
+                ram_max = int(sizes_parts[1])
+            elif len(sizes_parts) == 1 and sizes_parts[0] or \
+                 len(sizes_parts) == 2 and not sizes_parts[1]:
+                ram_min = int(sizes_parts[0])
+                ram_max = None
+            else:
+                raise Exception("can't parse %s, expected <int>-[<int>]" % ram_sizes)
+            if (ram_min <= ram_gb and ram_max is None) or (ram_min <= ram_gb < ram_max):
+                return int(timeout)
+    except Exception as ex:
+        log("Failed to parse the freeze timeout curve, error: %s. "
+            "The pm_freeze_timeout will not be adjusted." % str(ex))
+        return None
+
+    log("Failed to find a fitting PM freeze timeout curve segment "
+        "for %d GB of RAM. The pm_freeze_timeout will not be adjusted." % ram_gb)
+    return None
+
+
+def adjust_pm_timeout(timeout):
+    try:
+        with open('/sys/power/pm_freeze_timeout') as fl:
+            cur_timeout = int(fl.read()) / 1000
+        if cur_timeout >= timeout:
+            log("Info current pm_freeze_timeout (%d seconds) is greater "
+                "than the requested (%d seconds), doing nothing" % (cur_timeout, timeout))
+        else:
+            with open('/sys/power/pm_freeze_timeout', 'w') as fl:
+                fl.write("%d" % (timeout*1000))
+            log("Adjusted pm_freeze_timeout to %d from %d" % (timeout, cur_timeout))
+    except Exception as e:
+        log("Failed to adjust pm_freeze_timeout to %d. Error: %s" % (timeout, str(e)))
+        exit(1)
+
+
 def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description="An EC2 agent that watches for instance stop "
@@ -388,6 +437,7 @@ def main():
     parser.add_argument("-syslog", "--log-to-syslog", help='Log to syslog', type=str)
     parser.add_argument("-stderr", "--log-to-stderr", help='Log to stderr', type=str)
     parser.add_argument("-e", "--check-ephemeral-volumes", help='Check if ephemeral volumes are mounted', type=str)
+    parser.add_argument("-u", "--freeze-timeout-curve", help='The pm_freeze_timeout curve (by RAM size)', type=str)
 
     parser.add_argument("-p", "--swap-ram-percentage", help='The target swap size as a percentage of RAM', type=int)
     parser.add_argument("-s", "--swap-target-size-mb", help='The target swap size in megabytes', type=int)
@@ -417,6 +467,11 @@ def main():
         target_swap_size = int(swap_percentage_size)
     log("Will check if swap is at least: %d megabytes" % (target_swap_size // (1024*1024)))
 
+    timeout = get_pm_freeze_timeout(config.freeze_timeout_curve, ram_bytes)
+    if timeout:
+        adjust_pm_timeout(timeout)
+
+    # Validate the swap configuration
     cur_swap = get_swap_space()
     bi = None
     if cur_swap >= target_swap_size:
