@@ -34,6 +34,7 @@ try:
 except:
     from configparser import ConfigParser, NoSectionError, NoOptionError
 
+SWAP_RESERVED_SIZE = 16384
 log_to_syslog = True
 log_to_stderr = True
 
@@ -413,8 +414,8 @@ def adjust_pm_timeout(timeout):
         with open('/sys/power/pm_freeze_timeout') as fl:
             cur_timeout = int(fl.read()) / 1000
         if cur_timeout >= timeout:
-            log("Info current pm_freeze_timeout (%d seconds) is greater "
-                "than the requested (%d seconds), doing nothing" % (cur_timeout, timeout))
+            log("Info current pm_freeze_timeout (%d seconds) is greater than or equal "
+                "to the requested (%d seconds) timeout, doing nothing" % (cur_timeout, timeout))
         else:
             with open('/sys/power/pm_freeze_timeout', 'w') as fl:
                 fl.write("%d" % (timeout*1000))
@@ -474,7 +475,7 @@ def main():
     # Validate the swap configuration
     cur_swap = get_swap_space()
     bi = None
-    if cur_swap >= target_swap_size:
+    if cur_swap >= target_swap_size - SWAP_RESERVED_SIZE:
         log("There's sufficient swap available (have %d, need %d)" %
             (cur_swap, target_swap_size))
         update_kernel_swap_offset()

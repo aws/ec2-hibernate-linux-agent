@@ -4,8 +4,6 @@
 # description: EC2 instance hibernation agent
 # processname: hibagent
 
-set -euo pipefail
-
 DAEMON_PATH="/usr/bin"
 
 NAME=hibagent
@@ -16,21 +14,23 @@ SCRIPTNAME=/etc/init.d/hibagent
 DAEMON=hibagent
 DAEMONOPTS="--config /etc/hibagent-config.cfg --pidfile $PIDFILE"
 
-COMMAND="$1"
-if [ -n "$COMMAND" ]; then
+if [[ $# -eq 0 ]]; then
     COMMAND="status"
+else
+    COMMAND="$1"
 fi
 
 case $COMMAND in
 start)
-	printf "%-50s" "Starting $NAME..."
+	printf "%-50s" "Starting $NAME...\n"
 	cd $DAEMON_PATH
-	PID=`$DAEMON $DAEMONOPTS > /dev/null 2>&1 & echo $!`
-	if [[ -z $PID ]]; then
-		printf "%s\n" "Fail"
-	else
-		echo $PID > $PIDFILE
+	rm -f $PIDFILE
+	PID=`$DAEMON $DAEMONOPTS > /dev/null 2>&1`
+	if [[ -f $PIDFILE ]]; then
 		printf "%s\n" "Ok"
+	else
+		printf "%s\n" "Fail"
+		exit 1
 	fi
 ;;
 status)
@@ -48,9 +48,8 @@ status)
 ;;
 stop)
 	printf "%-50s" "Stopping $NAME"
-		PID=`cat $PIDFILE`
-		cd $DAEMON_PATH
 	if [[ -f $PIDFILE ]]; then
+		PID=`cat $PIDFILE`
 		kill -HUP $PID
 		printf "%s\n" "Ok"
 		rm -f $PIDFILE
