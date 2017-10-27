@@ -28,6 +28,54 @@ if platform.system() == "Darwin":
     os.O_DIRECT = 0  # Just pretend that it's there
 
 
+class TestGrubPatching(unittest.TestCase):
+    doc = """
+# created by imagebuilder
+default=0
+timeout=0
+hiddenmenu
+
+title Amazon Linux 2017.09 (4.9.51-10.53.amzn1.x86_64)
+root (hd0,0)
+kernel /boot/vmlinuz-4.9.51-10.53.amzn1.x86_64 root=LABEL=/ console=tty1 console=ttyS0 selinux=0 LANG=en_US.UTF-8 KEYTABLE=us
+initrd /boot/initramfs-4.9.51-10.53.amzn1.x86_64.img
+
+title Amazon Linux 2017.09 (4.9.51-10.52.amzn1.x86_64)
+root (hd0,0)
+kernel /boot/vmlinuz-4.9.51-10.52.amzn1.x86_64 root=LABEL=/ console=tty1 console=ttyS0 selinux=0
+initrd /boot/initramfs-4.9.51-10.52.amzn1.x86_64.img
+    """
+    good_doc = """
+# created by imagebuilder
+default=0
+timeout=0
+hiddenmenu
+
+title Amazon Linux 2017.09 (4.9.51-10.53.amzn1.x86_64)
+root (hd0,0)
+kernel /boot/vmlinuz-4.9.51-10.53.amzn1.x86_64 root=LABEL=/ console=tty1 console=ttyS0 selinux=0 LANG=en_US.UTF-8 KEYTABLE=us no_console_suspend=1 resume_offset=123 resume=/dev/help
+initrd /boot/initramfs-4.9.51-10.53.amzn1.x86_64.img
+
+title Amazon Linux 2017.09 (4.9.51-10.52.amzn1.x86_64)
+root (hd0,0)
+kernel /boot/vmlinuz-4.9.51-10.52.amzn1.x86_64 root=LABEL=/ console=tty1 console=ttyS0 selinux=0 no_console_suspend=1 resume_offset=123 resume=/dev/help
+initrd /boot/initramfs-4.9.51-10.52.amzn1.x86_64.img
+    """
+
+    def test_patch(self):
+        grub = mktemp()
+        with open(grub, "w") as fl:
+            fl.write(TestGrubPatching.doc)
+
+        hibagent.patch_grub_config("/dev/help", 123, grub)
+
+        with open(grub, "r") as fl:
+            content = fl.read()
+        unlink(grub)
+
+        self.assertEqual(TestGrubPatching.good_doc, content)
+
+
 class TestPmFreezeCurve(unittest.TestCase):
     def test_curve_parsing(self):
         curve = '0-8:20,8-16:40,16-64:60,64-128:150,128-256:200,256-:400'

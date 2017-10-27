@@ -18,7 +18,7 @@ import os
 import struct
 import sys
 import syslog
-from subprocess import check_call
+from subprocess import check_call, check_output
 from threading import Thread
 from math import ceil
 from time import sleep
@@ -34,6 +34,7 @@ try:
 except:
     from configparser import ConfigParser, NoSectionError, NoOptionError
 
+GRUB_FILE = '/boot/grub/menu.lst'
 SWAP_RESERVED_SIZE = 16384
 log_to_syslog = True
 log_to_stderr = True
@@ -97,6 +98,35 @@ def get_swap_space():
         return int(lines[0].split()[2]) * 1024
 
 
+def patch_grub_config(swap_device, offset, grub_file):
+    log("Updating GRUB to use the device %s with offset %d for resume" % (swap_device, offset))
+    lines = []
+    with open(grub_file) as fl:
+        for ln in fl.readlines():
+            params = ln.split()
+            if "kernel" not in params:
+                lines.append(ln)
+                continue
+
+            new_params = []
+            for param in params:
+                if "resume_offset=" in param or "resume=" in param:
+                    continue
+                new_params.append(param)
+
+            if "no_console_suspend=" not in ln:
+                new_params.append("no_console_suspend=1")
+            new_params.append("resume_offset=%d" % offset)
+            new_params.append("resume=%s" % swap_device)
+
+            lines.append(" ".join(new_params)+"\n")
+
+    with open(grub_file, "w") as fl:
+        fl.write("".join(lines))
+
+    log("GRUB configuration is updated")
+
+
 def update_kernel_swap_offset():
     with open('/proc/swaps') as swp:
         lines = swp.readlines()[1:]
@@ -108,6 +138,12 @@ def update_kernel_swap_offset():
     statbuf = os.stat(filename)
     dev = statbuf.st_dev
     offset = get_file_block_number(filename)
+
+    # Find the mount point for the swap file ('df -P /swap')
+    df_out = check_output(['df', '-P', filename])
+    dev_str = df_out.split("\n")[1].split()[0]
+
+    patch_grub_config(dev_str, offset, GRUB_FILE)
 
     log("Setting swap device to %d with offset %d" % (dev, offset))
 
