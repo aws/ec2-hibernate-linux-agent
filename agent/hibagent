@@ -127,7 +127,7 @@ def patch_grub_config(swap_device, offset, grub_file):
     log("GRUB configuration is updated")
 
 
-def update_kernel_swap_offset():
+def update_kernel_swap_offset(grub_update):
     with open('/proc/swaps') as swp:
         lines = swp.readlines()[1:]
         if not lines:
@@ -139,11 +139,14 @@ def update_kernel_swap_offset():
     dev = statbuf.st_dev
     offset = get_file_block_number(filename)
 
-    # Find the mount point for the swap file ('df -P /swap')
-    df_out = check_output(['df', '-P', filename])
-    dev_str = df_out.split("\n")[1].split()[0]
+    if grub_update:
+        # Find the mount point for the swap file ('df -P /swap')
+        df_out = check_output(['df', '-P', filename])
+        dev_str = df_out.split("\n")[1].split()[0]
 
-    patch_grub_config(dev_str, offset, GRUB_FILE)
+        patch_grub_config(dev_str, offset, GRUB_FILE)
+    else:
+        log("Skipping GRUB configuration update")
 
     log("Setting swap device to %d with offset %d" % (dev, offset))
 
@@ -157,12 +160,13 @@ def update_kernel_swap_offset():
 
 
 class SwapInitializer(object):
-    def __init__(self, filename, swap_size, mkswap, swapon):
+    def __init__(self, filename, swap_size, touch_swap, mkswap, swapon):
         self.filename = filename
         self.swap_size = swap_size
         self.need_to_hurry = False
         self.mkswap = mkswap
         self.swapon = swapon
+        self.touch_swap = touch_swap
 
     def do_allocate(self):
         log("Allocating %d bytes in %s" % (self.swap_size, self.filename))
@@ -182,6 +186,11 @@ class SwapInitializer(object):
         except OSError:
             pass
         self.do_allocate()
+
+        if not self.touch_swap:
+            log("Swap pre-heating is skipped, the swap blocks won't be touched during "
+                "initialization to ensure they are ready")
+            return
 
         written = 0
         log("Opening %s for direct IO" % self.filename)
@@ -223,10 +232,11 @@ class SwapInitializer(object):
 
 
 class BackgroundInitializerRunner(object):
-    def __init__(self, swapper):
+    def __init__(self, swapper, update_grub):
         self.swapper = swapper
         self.thread = None
         self.error = None
+        self.update_grub = update_grub
 
     def start_init(self):
         self.thread = Thread(target=self.do_async_init, name="SwapInitializer")
@@ -258,7 +268,7 @@ class BackgroundInitializerRunner(object):
         try:
             self.swapper.init_swap()
             self.swapper.turn_on_swap()
-            update_kernel_swap_offset()
+            update_kernel_swap_offset(self.update_grub)
         except Exception as ex:
             log("Failed to initialize swap, reason: %s" % str(ex))
             self.error = ex
@@ -372,6 +382,12 @@ class Config(object):
             self.to_bool(get('core', 'log-to-syslog')), self.to_bool(args.log_to_syslog), True)
         self.log_to_stderr = self.merge(
             self.to_bool(get('core', 'log-to-stderr')), self.to_bool(args.log_to_stderr), True)
+
+        self.touch_swap = self.merge(
+            self.to_bool(get('core', 'touch-swap')), self.to_bool(args.touch_swap), True)
+        self.grub_update = self.merge(
+            self.to_bool(get('core', 'grub-update')), self.to_bool(args.grub_update), True)
+
         self.ephemeral_check = self.merge(
             self.to_bool(get('core', 'check-ephemeral-volumes')),
             self.to_bool(args.check_ephemeral_volumes), True)
@@ -473,6 +489,8 @@ def main():
     parser.add_argument("-l", "--lock-in-ram", help='Lock the code in RAM', type=str)
     parser.add_argument("-syslog", "--log-to-syslog", help='Log to syslog', type=str)
     parser.add_argument("-stderr", "--log-to-stderr", help='Log to stderr', type=str)
+    parser.add_argument("-touch", "--touch-swap", help='Do swap initialization', type=str)
+    parser.add_argument("-grub", "--grub-update", help='Update GRUB config with resume offset', type=str)
     parser.add_argument("-e", "--check-ephemeral-volumes", help='Check if ephemeral volumes are mounted', type=str)
     parser.add_argument("-u", "--freeze-timeout-curve", help='The pm_freeze_timeout curve (by RAM size)', type=str)
 
@@ -514,7 +532,7 @@ def main():
     if cur_swap >= target_swap_size - SWAP_RESERVED_SIZE:
         log("There's sufficient swap available (have %d, need %d)" %
             (cur_swap, target_swap_size))
-        update_kernel_swap_offset()
+        update_kernel_swap_offset(config.grub_update)
     elif cur_swap > 0:
         log("There's not enough swap space available (have %d, need %d), exiting" %
             (cur_swap, target_swap_size))
@@ -533,9 +551,9 @@ def main():
         log("There's enough space (%d present, %d needed) on the swap device: %s" % (
             free_bytes, free_space_needed, swap_dev))
 
-        sw = SwapInitializer(config.swapfile, target_swap_size,
+        sw = SwapInitializer(config.swapfile, target_swap_size, config.touch_swap,
                              config.mkswap, config.swapon)
-        bi = BackgroundInitializerRunner(sw)
+        bi = BackgroundInitializerRunner(sw, config.grub_update)
 
     # Daemonize now! The parent process will not return from this method
     if not args.foreground:

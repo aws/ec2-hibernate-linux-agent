@@ -22,7 +22,7 @@ except:
     HTTPServer=BaseHTTPServer.HTTPServer
 
 # Patch out a function that require actual root privileges
-hibagent.update_kernel_swap_offset = lambda: 0
+hibagent.update_kernel_swap_offset = lambda _: 0
 
 if platform.system() == "Darwin":
     os.O_DIRECT = 0  # Just pretend that it's there
@@ -42,7 +42,7 @@ initrd /boot/initramfs-4.9.51-10.53.amzn1.x86_64.img
 
 title Amazon Linux 2017.09 (4.9.51-10.52.amzn1.x86_64)
 root (hd0,0)
-kernel /boot/vmlinuz-4.9.51-10.52.amzn1.x86_64 root=LABEL=/ console=tty1 console=ttyS0 selinux=0
+kernel /boot/vmlinuz-4.9.51-10.52.amzn1.x86_64 root=LABEL=/ resume_offset=456 console=tty1 console=ttyS0 selinux=0 resume=/dev/nope
 initrd /boot/initramfs-4.9.51-10.52.amzn1.x86_64.img
     """
     good_doc = """
@@ -64,14 +64,16 @@ initrd /boot/initramfs-4.9.51-10.52.amzn1.x86_64.img
 
     def test_patch(self):
         grub = mktemp()
-        with open(grub, "w") as fl:
-            fl.write(TestGrubPatching.doc)
+        try:
+            with open(grub, "w") as fl:
+                fl.write(TestGrubPatching.doc)
 
-        hibagent.patch_grub_config("/dev/help", 123, grub)
+            hibagent.patch_grub_config("/dev/help", 123, grub)
 
-        with open(grub, "r") as fl:
-            content = fl.read()
-        unlink(grub)
+            with open(grub, "r") as fl:
+                content = fl.read()
+        finally:
+            unlink(grub)
 
         self.assertEqual(TestGrubPatching.good_doc, content)
 
@@ -112,7 +114,7 @@ class TestHibernation(unittest.TestCase):
         _unlink(self.swapon_flag)
 
     def test_swap_initializer(self):
-        si = hibagent.SwapInitializer(self.swapfile, 100663296,
+        si = hibagent.SwapInitializer(self.swapfile, 100663296, True,
                                       '/usr/bin/touch %s' % self.mkswap_flag,
                                       '/usr/bin/touch %s' % self.swapon_flag)
         # Default filler
@@ -120,7 +122,7 @@ class TestHibernation(unittest.TestCase):
         self.do_fill_file(si, expected)
 
     def test_need_to_hurry(self):
-        si = hibagent.SwapInitializer(self.swapfile, 100663296,
+        si = hibagent.SwapInitializer(self.swapfile, 100663296, True,
                                       '/usr/bin/touch %s' % self.mkswap_flag,
                                       '/usr/bin/touch %s' % self.swapon_flag)
         si.need_to_hurry = True
@@ -164,7 +166,7 @@ class FakeSwapper(object):
 class TestSwapInitializer(unittest.TestCase):
     def test_background_run(self):
         fs = FakeSwapper()
-        bi = hibagent.BackgroundInitializerRunner(fs)
+        bi = hibagent.BackgroundInitializerRunner(fs, False)
         bi.start_init()
         self.assertFalse(bi.check_finished())
 
@@ -177,7 +179,7 @@ class TestSwapInitializer(unittest.TestCase):
 
     def test_early_interrupt(self):
         fs = FakeSwapper()
-        bi = hibagent.BackgroundInitializerRunner(fs)
+        bi = hibagent.BackgroundInitializerRunner(fs, False)
         bi.start_init()
         self.assertFalse(bi.check_finished())
         bi.force_completion()
@@ -189,7 +191,7 @@ class TestSwapInitializer(unittest.TestCase):
             raise Exception("test")
 
         fs = FakeSwapper()
-        bi = hibagent.BackgroundInitializerRunner(fs)
+        bi = hibagent.BackgroundInitializerRunner(fs, False)
         fs.init_swap = raiser
         bi.start_init()
         try:
