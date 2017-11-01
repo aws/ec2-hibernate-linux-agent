@@ -33,13 +33,14 @@ An EC2 agent that watches for instance stop notifications and initiates hibernat
 %{_sysconfdir}/hibagent-config.cfg
 %{_sysconfdir}/init.d/hibagent
 %{_bindir}/hibagent
+%{_bindir}/enable-ec2-spot-hibernation
 %{sys_python_sitelib}/*
 
 %clean
 rm -rf $RPM_BUILD_ROOT
 
 %post
-if [ $1 = 1 ]; then 
+if [ $1 = 1 ]; then
     #initial installation
     /sbin/chkconfig --add hibagent
 fi

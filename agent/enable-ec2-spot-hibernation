@@ -1,0 +1,9 @@
+#!/bin/bash
+# Add this script in your user-data to turn on the hibernation support
+# for the EC2 Spot Instances.
+
+# Make sure the agent is added to the auto-start
+/sbin/chkconfig hibagent on
+
+# And start it
+exec service hibagent start

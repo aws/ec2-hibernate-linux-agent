@@ -1,6 +1,6 @@
 #!/bin/bash
 # hibagent daemon
-# chkconfig: 345 20 80
+# chkconfig: - 20 80
 # description: EC2 instance hibernation agent
 # processname: hibagent
 
@@ -15,14 +15,15 @@ DAEMON=hibagent
 DAEMONOPTS="--config /etc/hibagent-config.cfg --pidfile $PIDFILE"
 
 if [[ $# -eq 0 ]]; then
-    COMMAND="status"
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
 else
     COMMAND="$1"
 fi
 
 case $COMMAND in
 start)
-	printf "%-50s" "Starting $NAME...\n"
+	printf "%-50s" "Starting $NAME..."
 	cd $DAEMON_PATH
 	rm -f $PIDFILE
 	PID=`$DAEMON $DAEMONOPTS > /dev/null 2>&1`
