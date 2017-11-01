@@ -24,10 +24,17 @@ fi
 case $COMMAND in
 start)
 	printf "%-50s" "Starting $NAME..."
-	cd $DAEMON_PATH
-	rm -f $PIDFILE
-	PID=`$DAEMON $DAEMONOPTS > /dev/null 2>&1`
 	if [[ -f $PIDFILE ]]; then
+		PID=`cat $PIDFILE`
+		if [[ "`ps axf | grep ${PID} | grep -v grep`" ]]; then
+			echo "hibagent is already running"
+			exit 0
+		fi
+	fi
+
+	cd $DAEMON_PATH
+	$DAEMON $DAEMONOPTS > /dev/null 2>&1
+	if [ $? -eq 0 ]; then
 		printf "%s\n" "Ok"
 	else
 		printf "%s\n" "Fail"
@@ -54,8 +61,10 @@ stop)
 		kill -HUP $PID
 		printf "%s\n" "Ok"
 		rm -f $PIDFILE
+		exit 0
 	else
-		printf "%s\n" "pidfile not found"
+		printf "%s\n" "already stopped"
+		exit 0
 	fi
 ;;
 
