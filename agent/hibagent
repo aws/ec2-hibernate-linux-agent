@@ -104,7 +104,7 @@ def patch_grub_config(swap_device, offset, grub_file):
     with open(grub_file) as fl:
         for ln in fl.readlines():
             params = ln.split()
-            if "kernel" not in params:
+            if not params or params[0] != 'kernel':
                 lines.append(ln)
                 continue
 
@@ -141,9 +141,8 @@ def update_kernel_swap_offset(grub_update):
 
     if grub_update:
         # Find the mount point for the swap file ('df -P /swap')
-        df_out = check_output(['df', '-P', filename])
+        df_out = check_output(['df', '-P', filename]).decode('ascii')
         dev_str = df_out.split("\n")[1].split()[0]
-
         patch_grub_config(dev_str, offset, GRUB_FILE)
     else:
         log("Skipping GRUB configuration update")
@@ -354,7 +353,7 @@ def daemonize(pidfile):
     atexit.register(lambda: os.unlink(pidfile))
 
     # Redirect standard file descriptors to null to avoid blocking
-    nul = file('/dev/null', 'a+')
+    nul = open('/dev/null', 'a+')
     os.dup2(nul.fileno(), sys.stdin.fileno())
     os.dup2(nul.fileno(), sys.stdout.fileno())
     os.dup2(nul.fileno(), sys.stderr.fileno())
