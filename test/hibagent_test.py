@@ -68,7 +68,7 @@ initrd /boot/initramfs-4.9.51-10.52.amzn1.x86_64.img
             with open(grub, "w") as fl:
                 fl.write(TestGrubPatching.doc)
 
-            hibagent.patch_grub_config("/dev/help", 123, grub)
+            hibagent.patch_grub_config("/dev/help", 123, grub, None)
 
             with open(grub, "r") as fl:
                 content = fl.read()

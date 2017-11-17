@@ -35,6 +35,7 @@ except:
     from configparser import ConfigParser, NoSectionError, NoOptionError
 
 GRUB_FILE = '/boot/grub/menu.lst'
+GRUB2_DIR = '/etc/default/grub.d'
 SWAP_RESERVED_SIZE = 16384
 log_to_syslog = True
 log_to_stderr = True
@@ -98,7 +99,7 @@ def get_swap_space():
         return int(lines[0].split()[2]) * 1024
 
 
-def patch_grub_config(swap_device, offset, grub_file):
+def patch_grub_config(swap_device, offset, grub_file, grub2_dir):
     log("Updating GRUB to use the device %s with offset %d for resume" % (swap_device, offset))
     lines = []
     with open(grub_file) as fl:
@@ -124,6 +125,15 @@ def patch_grub_config(swap_device, offset, grub_file):
     with open(grub_file, "w") as fl:
         fl.write("".join(lines))
 
+    # Do GRUB2 update as well
+    if grub2_dir and os.path.exists(grub2_dir):
+        offset_file = os.path.join(grub2_dir, '99-set-swap.cfg')
+        if not os.path.exists(offset_file):
+            with open(offset_file, 'w') as fl:
+                fl.write('GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT no_console_suspend=1 '
+                         'resume_offset=%d resume=%s"\n' % (offset, swap_device))
+            check_call('/usr/sbin/update-grub2')
+
     log("GRUB configuration is updated")
 
 
@@ -143,7 +153,7 @@ def update_kernel_swap_offset(grub_update):
         # Find the mount point for the swap file ('df -P /swap')
         df_out = check_output(['df', '-P', filename]).decode('ascii')
         dev_str = df_out.split("\n")[1].split()[0]
-        patch_grub_config(dev_str, offset, GRUB_FILE)
+        patch_grub_config(dev_str, offset, GRUB_FILE, GRUB2_DIR)
     else:
         log("Skipping GRUB configuration update")
 
