@@ -128,11 +128,10 @@ def patch_grub_config(swap_device, offset, grub_file, grub2_dir):
     # Do GRUB2 update as well
     if grub2_dir and os.path.exists(grub2_dir):
         offset_file = os.path.join(grub2_dir, '99-set-swap.cfg')
-        if not os.path.exists(offset_file):
-            with open(offset_file, 'w') as fl:
-                fl.write('GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT no_console_suspend=1 '
-                         'resume_offset=%d resume=%s"\n' % (offset, swap_device))
-            check_call('/usr/sbin/update-grub2')
+        with open(offset_file, 'w') as fl:
+            fl.write('GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT no_console_suspend=1 '
+                     'resume_offset=%d resume=%s"\n' % (offset, swap_device))
+        check_call('/usr/sbin/update-grub2')
 
     log("GRUB configuration is updated")
 
