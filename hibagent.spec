@@ -4,7 +4,7 @@ Release:        1%{?dist}
 Summary:        Hibernation trigger utility for AWS EC2
 
 Group:          Development/Languages
-License:        MIT
+License:        ASL 2.0
 URL:            https://github.com/awslabs/hibagent
 Source0:        hibagent-%{version}.tar.gz
 BuildArch:      noarch
