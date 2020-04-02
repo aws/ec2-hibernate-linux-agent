@@ -23,7 +23,6 @@ from threading import Thread
 from math import ceil
 from time import sleep
 
-
 try:
     from urllib.request import urlopen, Request
 except ImportError:
@@ -305,16 +304,28 @@ class ItnPoller(object):
 
     def poll_for_termination(self):
         # noinspection PyBroadException
-        response = None
+        response1 = None
+        response2 = None
         try:
-            response = urlopen(self.url)
-            res_str = response.read()
-            return b"hibernate" in res_str
+            request1 = Request("http://169.254.169.254/latest/api/token")
+            request1.add_header('X-aws-ec2-metadata-token-ttl-seconds', '21600')
+            request1.get_method = lambda:"PUT"
+            response1 = urlopen(request1)
+
+            token = response1.read()
+
+            request2 = Request(self.url)
+            request2.add_header('X-aws-ec2-metadata-token', token)
+            response2 = urlopen(request2)
+            res = response2.read()
+            return b"hibernate" in res
         except:
             return False
         finally:
-            if response:
-                response.close()
+            if response1:
+                response1.close()
+            if response2:
+                response2.close()
 
     def do_hibernate(self):
         log("Attempting to hibernate")
