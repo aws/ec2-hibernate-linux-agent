@@ -104,30 +104,32 @@ def get_partuuid(device):
 
 
 def patch_grub_config(swap_device, offset, grub_file, grub2_dir):
-    log("Updating GRUB to use the device %s with offset %d for resume" % (swap_device, offset))
-    lines = []
-    with open(grub_file) as fl:
-        for ln in fl.readlines():
-            params = ln.split()
-            if not params or params[0] != 'kernel':
-                lines.append(ln)
-                continue
-
-            new_params = []
-            for param in params:
-                if "resume_offset=" in param or "resume=" in param:
+    log("Updating GRUB to use the device %s with offset %d for resume"
+        % (swap_device, offset))
+    if grub_file and os.path.exists(grub_file):
+        lines = []
+        with open(grub_file) as fl:
+            for ln in fl.readlines():
+                params = ln.split()
+                if not params or params[0] != 'kernel':
+                    lines.append(ln)
                     continue
-                new_params.append(param)
-
-            if "no_console_suspend=" not in ln:
-                new_params.append("no_console_suspend=1")
-            new_params.append("resume_offset=%d" % offset)
-            new_params.append("resume=%s" % swap_device)
-
-            lines.append(" ".join(new_params)+"\n")
-
-    with open(grub_file, "w") as fl:
-        fl.write("".join(lines))
+    
+                new_params = []
+                for param in params:
+                    if "resume_offset=" in param or "resume=" in param:
+                        continue
+                    new_params.append(param)
+    
+                if "no_console_suspend=" not in ln:
+                    new_params.append("no_console_suspend=1")
+                new_params.append("resume_offset=%d" % offset)
+                new_params.append("resume=%s" % swap_device)
+    
+                lines.append(" ".join(new_params)+"\n")
+    
+        with open(grub_file, "w") as fl:
+            fl.write("".join(lines))
 
     # Do GRUB2 update as well
     if grub2_dir and os.path.exists(grub2_dir):
