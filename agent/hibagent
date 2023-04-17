@@ -18,6 +18,7 @@ import os
 import struct
 import sys
 import syslog
+import requests
 from subprocess import check_call, check_output
 from threading import Thread
 from math import ceil
@@ -507,7 +508,7 @@ def get_imds_token(seconds=21600):
     token_url = '{}/{}'.format(IMDS_BASEURL, IMDS_API_TOKEN_PATH)
     response = requests.put(token_url, headers=request_header)
     response.close()
-    if response.status_code != 200:
+    if not response.ok:
         return None
 
     return response.text
@@ -524,7 +525,7 @@ def hibernation_enabled():
     response = requests.get("{}/{}".format(IMDS_BASEURL, IMDS_SPOT_ACTION_PATH),
                  headers=request_header)
     response.close()
-    if response.status_code != 200 or response.text.lower() == "false":
+    if not response.ok or response.text.lower() == "false":
         return False
 
     log("Hibernation Configured Flag found")
