@@ -39,6 +39,9 @@ SWAP_RESERVED_SIZE = 16384
 log_to_syslog = True
 log_to_stderr = True
 
+IMDS_BASEURL = 'http://169.254.169.254'
+IMDS_API_TOKEN_PATH = 'latest/api/token'
+IMDS_SPOT_ACTION_PATH = 'latest/meta-data/hibernation/configured'
 
 def log(message):
     if log_to_syslog:
@@ -497,6 +500,36 @@ def adjust_pm_timeout(timeout):
         log("Failed to adjust pm_freeze_timeout to %d. Error: %s" % (timeout, str(e)))
         exit(1)
 
+def get_imds_token(seconds=21600):
+    """ Get a token to access instance metadata. """
+    log("Requesting new IMDSv2 token.")
+    request_header = {'X-aws-ec2-metadata-token-ttl-seconds': '{}'.format(seconds)}
+    token_url = '{}/{}'.format(IMDS_BASEURL, IMDS_API_TOKEN_PATH)
+    response = requests.put(token_url, headers=request_header)
+    response.close()
+    if response.status_code != 200:
+        return None
+
+    return response.text
+
+def hibernation_enabled():
+    """Returns a boolean indicating whether hibernation-option.configured is enabled or not."""
+
+    imds_token = get_imds_token()
+    if imds_token is None:
+        # IMDS http endpoint is disabled
+        return False
+
+    request_header = {'X-aws-ec2-metadata-token': imds_token}
+    response = requests.get("{}/{}".format(IMDS_BASEURL, IMDS_SPOT_ACTION_PATH),
+                 headers=request_header)
+    response.close()
+    if response.status_code != 200 or response.text.lower() == "false":
+        return False
+
+    log("Hibernation Configured Flag found")
+
+    return True
 
 def main():
     # Parse arguments
@@ -535,6 +568,11 @@ def main():
     log_to_syslog = config.log_to_syslog
 
     log("Effective config: %s" % config)
+
+    # Let's first check if we need to kill the Spot Hibernate Agent
+    if hibernation_enabled():
+        log("Spot Instance Launch has enabled Hibernation Configured Flag. hibagent exiting!!")
+        exit(0)
 
     target_swap_size = config.swap_mb * 1024 * 1024
     ram_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
