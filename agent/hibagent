@@ -518,6 +518,7 @@ def hibernation_enabled():
 
     imds_token = get_imds_token()
     if imds_token is None:
+        log("IMDS_V2 http endpoint is disabled")
         # IMDS http endpoint is disabled
         return False
 
