@@ -1,6 +1,6 @@
 Name:           hibagent
-Version:        1.0.0
-Release:        1%{?dist}
+Version:        1.1.0
+Release:        6%{?dist}
 Summary:        Hibernation trigger utility for AWS EC2
 
 Group:          Development/Languages
