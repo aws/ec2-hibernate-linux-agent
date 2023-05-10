@@ -14,7 +14,7 @@ with open("README.md", "r") as fp:
     hib_long_description = fp.read()
 
 setup(name="hibagent",
-      version='1.0.0',
+      version='1.1.0',
       author="Aleksei Besogonov",
       author_email="cyberax@amazon.com",
       url="https://github.com/awslabs/hibagent",
