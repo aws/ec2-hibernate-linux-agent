@@ -1,4 +1,13 @@
-# The EC2 Spot hibernation agent.
+# The EC2 Spot hibernation agent (Legacy)
+
+
+> With the release of On-Demand Spot Hibernation, this repo has entered legacy status
+
+> Please refer to the [hibinit-agent](https://github.com/aws/amazon-ec2-hibinit-agent) repo used for on-demand hibernation
+> 
+> Related Documentation: 
+> * Instructions to enable Spot Hibernation | [Link](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/hibernate-spot-instances.html)
+
 
 ## License
 The code is released under Apache License Vesion 2.0. See LICENSE.txt for details.
